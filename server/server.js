@@ -4,13 +4,13 @@ const axios = require("axios");
 const admin = require("firebase-admin");
 
 const app = express();
+app.use(express.json());
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 
 // Firebase service account JSON file
-// Ensure you have a serviceAccountKey.json file in this directory.
 const serviceAccount = require("./serviceAccountKey.json");
 
 admin.initializeApp({
@@ -20,58 +20,95 @@ admin.initializeApp({
 
 const db = admin.database();
 
-// ===== STATE CONTROL (anti-spam) =====
-let lastAlertState = false;
+// ===== STATE =====
+let lastState = "SAFE";
+let lastAlertTime = 0;
+const COOLDOWN = 15000; // 15 sec
+let isInitialLoad = true;
 
-// ===== TELEGRAM SEND =====
+// ===== TELEGRAM =====
 async function sendTelegram(message) {
-  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
-
   try {
-    await axios.post(url, {
+    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       chat_id: CHAT_ID,
-      text: message
+      text: message,
     });
-
     console.log("[TELEGRAM] Sent");
   } catch (err) {
     console.log("[TELEGRAM ERROR]", err.message);
   }
 }
 
-// ===== FIREBASE LISTENER =====
-db.ref("devices/device_1").on("value", async (snapshot) => {
-  const data = snapshot.val();
+// ===== ALERT HANDLER =====
+async function handleAlert(data, source) {
+  const now = Date.now();
+  const state = data.alert ? "DANGER" : "SAFE";
 
-  if (!data) return;
+  console.log(`[ALERT via ${source}]`, data);
 
-  console.log("[DATA]", data);
+  if (state === "DANGER" && lastState === "SAFE") {
 
-  const isDanger = data.alert === true;
-
-  // Trigger only when SAFE → DANGER
-  if (isDanger && !lastAlertState) {
+    if (now - lastAlertTime < COOLDOWN) {
+      console.log("[SKIP] Cooldown active");
+      return;
+    }
 
     const message = `
-🔥 FIRE ALERT 🔥
+🔥 FIRE ALERT (${source}) 🔥
+
+
 
 Temperature is very high
 Smoke: ${data.smoke}
 
 Status: DANGER
+
 `;
 
     await sendTelegram(message);
+
+    lastAlertTime = now;
   }
 
-  lastAlertState = isDanger;
+  // Update state so we don't keep firing
+  lastState = state;
+}
+
+// ===== FIREBASE LISTENER =====
+db.ref("devices/device_1").on("value", async (snapshot) => {
+  const data = snapshot.val();
+  
+  if (!data) return;
+
+  if (isInitialLoad) {
+    console.log("[INIT] Initial database state loaded. Current alert state is:", data.alert);
+    isInitialLoad = false;
+    lastState = data.alert ? "DANGER" : "SAFE";
+    return; // Don't trigger an alert on the initial startup
+  }
+
+  await handleAlert(data, "Firebase");
 });
 
-// ===== SERVER =====
+// ===== ROUTES =====
+
+// Wake endpoint (fast response)
+app.get("/wake", (req, res) => {
+  console.log("[WAKE] Server awakened");
+  res.send("OK");
+});
+
+// Alert endpoint (ESP sends here)
+app.post("/alert", async (req, res) => {
+  await handleAlert(req.body, "HTTP");
+  res.send("OK");
+});
+
 app.get("/", (req, res) => {
   res.send("Server Running");
 });
 
+// ===== START =====
 app.listen(3000, () => {
   console.log("Server running on port 3000");
 });
