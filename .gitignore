@@ -1,0 +1,9 @@
+# Node
+node_modules/
+.env
+serviceAccountKey.json
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
